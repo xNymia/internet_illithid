@@ -1,0 +1,7 @@
+.idea/
+*.pyc
+venv3/
+*.sqlite3
+*.conf
+components/
+static/
