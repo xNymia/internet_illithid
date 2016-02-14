@@ -1,38 +1,37 @@
-# TODO: Verify working example code
 # TODO: Add additional logic for picking proper twitch chat server via Twitch REST API
-# TODO: Move configuration of collector over to command line options instead of config file for account information
+# TODO: Implement logic for collecting from the top n streamers based on viewer count
+# TODO: Option to connect to most popular channels on startup.
 import configparser
-import sys
-import irc.bot, irc.strings
+import irc.bot
+import irc.strings
 import elasticsearch
 import traceback
+import argparse
 from datetime import datetime
 
 
 class CollectBot(irc.bot.SingleServerIRCBot):
 
-    def __init__(self, channel, config_file='conf/twitch_collector.conf'):
+    def __init__(self, channel, server, port, config_file='twitch_collector.conf', verbose=False):
         # Parse Configuration File
         config = configparser.RawConfigParser()
         config.read(config_file)
 
         # Obtain Configuration Vaules
-        server = config.get('TwitchSettings', 'server')
-        port = int(config.get('TwitchSettings', 'port'))
         nickname = config.get('TwitchSettings', 'nick')
-        username = config.get('TwitchSettings', 'username')
-        self.password = config.get('TwitchSettings', 'password')
+        password = config.get('TwitchSettings', 'password')
         self.channel = channel
+        self.verbose = verbose
 
-        irc.bot.SingleServerIRCBot.__init__(self, [(server, port, self.password)], nickname, nickname)
+        irc.bot.SingleServerIRCBot.__init__(self, [(server, port, password)], nickname, nickname)
 
     def on_welcome(self, c, e):
         c.join(self.channel)
 
     def on_pubmsg(self, c, e):
-        print(e.source.split('!')[0], e.arguments[0])
+        if self.verbose:
+            print(e.source.split('!')[0], e.arguments[0])
         self.index_message([e.source.split('!')[0], e.arguments[0]])
-        return
 
     def setup_index(self):
         elastic = elasticsearch.Elasticsearch()
@@ -70,6 +69,26 @@ class CollectBot(irc.bot.SingleServerIRCBot):
 
 
 if __name__ == "__main__":
-    channel = sys.argv[1]
-    bot = CollectBot(channel)
-    bot.start()
+
+    # argparse configuration
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--buildindex", action="store_true")
+    parser.add_argument("--config")
+    parser.add_argument("--verbose", action="store_true")
+    parser.add_argument("channel")
+    parser.add_argument("server")
+    parser.add_argument("port")
+    args = parser.parse_args()
+
+    verbose = args.verbose
+
+    if args.config:
+        bot = CollectBot("#" + args.channel, args.server, int(args.port), config_file=args.config, verbose=verbose)
+    else:
+        bot = CollectBot("#" + args.channel, args.server, int(args.port), verbose=verbose)
+
+    if args.buildindex:
+        print("Building ElasticSearch index...")
+        bot.setup_index()
+    else:
+        bot.start()
