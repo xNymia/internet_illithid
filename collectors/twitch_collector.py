@@ -1,4 +1,3 @@
-# TODO: Can't get the chatbot to die and kill its thread
 from datetime import datetime
 from time import sleep
 import logging
@@ -9,9 +8,8 @@ import elasticsearch
 import traceback
 import argparse
 import requests
-import threading
 import random
-import sys
+import multiprocessing
 
 log_level = "INFO"
 logger = logging.getLogger(__name__)
@@ -102,33 +100,32 @@ def collect_top_channels(limit):
         chat_servers = requests.get(url).json()['chat_servers']
         target_server = random.choice(chat_servers).split(':')
         collector = CollectBot("#"+chan_name, target_server[0], int(target_server[1]))
-        cthread = threading.Thread(target=collector.start)
-        collector_threads[chan_name] = collector
-        cthread.start()
+        proc = multiprocessing.Process(target=collector.start)
+        collector_threads[chan_name] = proc
+        proc.start()
 
     while True:
-        sleep(60*1)
-        print("Live threads:", str(threading.active_count()))
-
+        sleep(60*5)
         top_chans = get_top_channels(limit=limit)['streams']
         top_names = set([x['channel']['name'] for x in top_chans])
         current_names = set(collector_threads.keys())
 
         for name in current_names.difference(top_names):
-            logger.info("Killing {} thread as it is no longer in the top list.".format(name))
             # stop the thread for the channels that are in current_names but not in top names
-            collector_threads[name].die()
+            logger.info("Killing {} thread as it is no longer in the top list.".format(name))
+            collector_threads[name].terminate()
             del(collector_threads[name])
 
         for chan_name in top_names.difference(current_names):
+            # Start threads for channels that are in the top list
             logger.info("Starting {} thread as it is in the top list.".format(chan_name))
             url = "https://api.twitch.tv/api/channels/{}/chat_properties".format(chan_name)
             chat_servers = requests.get(url).json()['chat_servers']
             target_server = random.choice(chat_servers).split(':')
             collector = CollectBot("#"+chan_name, target_server[0], int(target_server[1]))
-            cthread = threading.Thread(target=collector.start)
-            collector_threads[chan_name] = collector
-            cthread.start()
+            proc = multiprocessing.Process(target=collector.start)
+            collector_threads[chan_name] = proc
+            proc.start()
 
 
 if __name__ == "__main__":
