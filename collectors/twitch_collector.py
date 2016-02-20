@@ -22,7 +22,8 @@ logger.addHandler(stdout_handler)
 
 class CollectBot(irc.bot.SingleServerIRCBot):
 
-    def __init__(self, channel, server, port, config_file='twitch_collector.conf', verbose=False, log_level="INFO"):
+    def __init__(self, channel, game, language, server, port, config_file='twitch_collector.conf',
+                 verbose=False, log_level="INFO"):
         # Parse Configuration File
         config = configparser.RawConfigParser()
         config.read(config_file)
@@ -30,8 +31,12 @@ class CollectBot(irc.bot.SingleServerIRCBot):
         # Obtain Configuration Vaules
         nickname = config.get('TwitchSettings', 'nick')
         password = config.get('TwitchSettings', 'password')
+
+        self.language = language
+        self.game = game
         self.channel = channel
         self.verbose = verbose
+        self.elastic = elasticsearch.Elasticsearch()
 
         logger.setLevel(logging.getLevelName(log_level))
 
@@ -46,7 +51,6 @@ class CollectBot(irc.bot.SingleServerIRCBot):
         self.index_message([e.source.split('!')[0], e.arguments[0]])
 
     def index_message(self, message):
-        elastic = elasticsearch.Elasticsearch()
         logger.debug("Indexing: [{}] <{}> {}".format(self.channel, message[0], message[1]))
 
         try:
@@ -54,9 +58,9 @@ class CollectBot(irc.bot.SingleServerIRCBot):
             body = message[1]
             timestamp = datetime.utcnow()
 
-            elastic.index(index='twitch_chat', doc_type='chat_message', body={"nick": nick,
-                                                                           "channel": self.channel, "body": body,
-                                                                           "timestamp": timestamp})
+            self.elastic.index(index='twitch_chat', doc_type='chat_message',
+                               body={"nick": nick, "channel": self.channel, "body": body, "timestamp": timestamp,
+                                     "game": self.game, "language": self.language})
         except:
             traceback.print_exc()
 
@@ -69,6 +73,8 @@ def setup_index():
                 "properties": {
                     "nick": {"type": "string", "index": "not_analyzed"},
                     "channel": {"type": "string"},
+                    "language": {"type": "string"},
+                    "game": {"type": "string"},
                     "body": {"type": "string"},
                     "timestamp": {"type": "date"},
                 }
@@ -89,43 +95,57 @@ def get_top_channels(limit=25):
     return channels
 
 
-def collect_top_channels(limit):
+def get_channel_info(channel_name):
+    url = "https://api.twitch.tv/kraken/streams/{}".format(channel_name)
+    info = requests.get(url).json()
+    return info
+
+
+def collect_top_channels(limit, wait_delay=5):
     collector_threads = {}
     top_chans = get_top_channels(limit=limit)
 
     for chan in top_chans['streams']:
         chan_name = chan['channel']['name']
-        logger.info("Starting {} thread as it is in the top list.".format(chan_name))
+        language = chan['channel']['language']
+        game = chan['channel']['game']
+        logger.info("Starting <{}> ({}) [{}] thread as it is in the top list.".format(language, game, chan_name))
         url = "https://api.twitch.tv/api/channels/{}/chat_properties".format(chan_name)
         chat_servers = requests.get(url).json()['chat_servers']
         target_server = random.choice(chat_servers).split(':')
-        collector = CollectBot("#"+chan_name, target_server[0], int(target_server[1]))
+        collector = CollectBot("#"+chan_name, game, language, target_server[0], int(target_server[1]))
         proc = multiprocessing.Process(target=collector.start)
         collector_threads[chan_name] = proc
         proc.start()
 
     while True:
-        sleep(60*5)
+        sleep(60*float(wait_delay))
         top_chans = get_top_channels(limit=limit)['streams']
         top_names = set([x['channel']['name'] for x in top_chans])
         current_names = set(collector_threads.keys())
 
         for name in current_names.difference(top_names):
             # stop the thread for the channels that are in current_names but not in top names
-            logger.info("Killing {} thread as it is no longer in the top list.".format(name))
+            logger.info("- Killing {} thread as it is no longer in the top list.".format(name))
             collector_threads[name].terminate()
             del(collector_threads[name])
 
         for chan_name in top_names.difference(current_names):
             # Start threads for channels that are in the top list
-            logger.info("Starting {} thread as it is in the top list.".format(chan_name))
+            chan_info = get_channel_info(chan_name)
+            game = chan_info['stream']['channel']['game']
+            language = chan_info['stream']['channel']['language']
+            logger.info("Starting <{}> ({}) [{}] thread as it is in the top list.".format(language, game, chan_name))
             url = "https://api.twitch.tv/api/channels/{}/chat_properties".format(chan_name)
             chat_servers = requests.get(url).json()['chat_servers']
             target_server = random.choice(chat_servers).split(':')
-            collector = CollectBot("#"+chan_name, target_server[0], int(target_server[1]))
+            collector = CollectBot("#"+chan_name, game, language, target_server[0], int(target_server[1]))
             proc = multiprocessing.Process(target=collector.start)
             collector_threads[chan_name] = proc
             proc.start()
+
+        current_names = set(collector_threads.keys())
+        logger.info("Current channels: {}".format(current_names))
 
 
 if __name__ == "__main__":
@@ -139,6 +159,7 @@ if __name__ == "__main__":
     parser.add_argument("--channel", "-c")
     parser.add_argument("--server", "-s")
     parser.add_argument("--port", "-p")
+    parser.add_argument("--refresh", "-r")
     parser.add_argument("--top", help="Collect from the top n streams.")
     args = parser.parse_args()
 
@@ -149,14 +170,26 @@ if __name__ == "__main__":
 
     verbose = args.verbose
 
+    if args.refresh:
+        refresh = args.refresh
+    else:
+        refresh = 5
+
     if args.config and args.channel and args.server and args.port:
-        bot = CollectBot("#" + args.channel, args.server, int(args.port), config_file=args.config, verbose=verbose)
+        chan_info = get_channel_info(args.channel)
+        game = chan_info['stream']['channel']['game']
+        language = chan_info['stream']['channel']['language']
+        bot = CollectBot("#" + args.channel, game, language, args.server, int(args.port), config_file=args.config,
+                         verbose=verbose,)
     elif args.channel and args.server and args.port:
-        bot = CollectBot("#" + args.channel, args.server, int(args.port), verbose=verbose)
+        chan_info = get_channel_info(args.channel)
+        game = chan_info['stream']['channel']['game']
+        language = chan_info['stream']['channel']['language']
+        bot = CollectBot("#" + args.channel, game, language, args.server, int(args.port), verbose=verbose)
     elif args.buildindex:
         print("Building ElasticSearch index...")
         setup_index()
     elif args.top:
-        collect_top_channels(args.top)
+        collect_top_channels(args.top, wait_delay=refresh)
     else:
         print(parser.print_help())
