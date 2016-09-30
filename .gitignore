@@ -5,4 +5,4 @@ venv3/
 *.conf
 components/
 static/
-tools/bin/
+bin/

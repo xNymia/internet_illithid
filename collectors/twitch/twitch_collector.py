@@ -4,12 +4,21 @@ import elasticsearch
 import configparser
 import traceback
 import argparse
+import logging
+from datetime import datetime
+
+log_level = "INFO"
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.getLevelName(log_level))
+stdout_handler = logging.StreamHandler()
+formatter = logging.Formatter('(%(asctime)s) [%(levelname)s]\t%(message)s')
+stdout_handler.setFormatter(formatter)
+logger.addHandler(stdout_handler)
 
 
 class CollectBot(irc.bot.SingleServerIRCBot):
 
-    def __init__(self, server, port, config_file='twitch_collector.conf',
-                 verbose=False, log_level="INFO"):
+    def __init__(self, channel, server, port, config_file='twitch_collector.conf', verbose=False, log_level="INFO"):
         # Parse Configuration File
         config = configparser.RawConfigParser()
         config.read(config_file)
@@ -18,7 +27,7 @@ class CollectBot(irc.bot.SingleServerIRCBot):
         nickname = config.get('TwitchSettings', 'nick')
         password = config.get('TwitchSettings', 'password')
 
-        self.channel = "riotgames"
+        self.channel = channel
         self.verbose = verbose
         self.elastic = elasticsearch.Elasticsearch()
 
@@ -43,8 +52,7 @@ class CollectBot(irc.bot.SingleServerIRCBot):
             timestamp = datetime.utcnow()
 
             self.elastic.index(index='twitch_chat', doc_type='chat_message',
-                               body={"nick": nick, "channel": self.channel, "body": body, "timestamp": timestamp,
-                                     "game": self.game, "language": self.language})
+                               body={"nick": nick, "channel": self.channel, "body": body, "timestamp": timestamp})
         except:
             traceback.print_exc()
 
@@ -57,6 +65,7 @@ def setup_index():
                 "properties": {
                     "nick": {"type": "string", "index": "not_analyzed"},
                     "body": {"type": "string"},
+                    "channel": {"type": "string"},
                     "timestamp": {"type": "date"},
                 }
             }
@@ -96,14 +105,13 @@ if __name__ == "__main__":
         refresh = 5
 
     if args.config and args.channel and args.server and args.port:
-        bot = CollectBot("#" + args.server, int(args.port), config_file=args.config,
-                         verbose=verbose,)
+        bot = CollectBot("#" + args.channel, args.server, int(args.port), config_file=args.config, verbose=verbose,)
+        bot.start()
     elif args.channel and args.server and args.port:
-        bot = CollectBot("#" + args.channel, game, language, args.server, int(args.port), verbose=verbose)
+        bot = CollectBot("#" + args.channel, args.server, int(args.port))
+        bot.start()
     elif args.buildindex:
         print("Building ElasticSearch index...")
         setup_index()
-    elif args.top:
-        collect_top_channels(args.top, wait_delay=refresh)
     else:
         print(parser.print_help())
